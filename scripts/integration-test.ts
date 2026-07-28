@@ -66,9 +66,7 @@ function request(
 try {
   const roots = [
     ["zexi.me", "思考的扰动"],
-    ["www.zexi.me", "思考的扰动"],
     ["wzx6.cn", "站点建设中"],
-    ["www.wzx6.cn", "站点建设中"],
     ["cheer.world", "Cheer 星球"],
   ];
   for (const [host, text] of roots) {
@@ -115,7 +113,7 @@ try {
   assert.equal(write.status, 405);
 
   console.log(
-    "integration checks passed: roots=5 article=1 asset=1 etag=1 404=1 method=1",
+    "integration checks passed: roots=3 article=1 asset=1 etag=1 404=1 method=1",
   );
 } finally {
   gateway.closeAllConnections();

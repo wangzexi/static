@@ -12,7 +12,6 @@ GET https://zexi.me/articles/hello/
 
 - bucket 默认叫 `sites`。
 - 每个域名对应一个同名目录。
-- `www.<domain>` 自动读取 `<domain>` 目录，不复制网站文件。
 - 只支持 `GET` 和 `HEAD`。
 - `/` 与以 `/` 结尾的路径读取目录下的 `index.html`。
 - 无扩展名路径若存在目录首页，会重定向到带 `/` 的规范地址。

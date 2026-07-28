@@ -5,7 +5,6 @@ import { after, before, test } from "node:test";
 import {
   createStaticServer,
   normalizeHost,
-  storageHostFor,
 } from "../src/server.ts";
 
 interface StoredObject {
@@ -157,24 +156,11 @@ test("normalizes valid host names and rejects unsafe ones", () => {
   assert.equal(normalizeHost("../zexi.me"), null);
 });
 
-test("maps www hosts to the same storage directory as the apex host", () => {
-  assert.equal(storageHostFor("www.zexi.me"), "zexi.me");
-  assert.equal(storageHostFor("zexi.me"), "zexi.me");
-});
-
 test("serves the site index by Host", async () => {
   const response = await request("/");
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("cache-control"), "no-cache");
   assert.equal(response.headers.get("etag"), '"home-v1"');
-  assert.equal(await response.text(), "<h1>home</h1>");
-});
-
-test("serves www from the apex host directory", async () => {
-  const response = await request("/", {
-    headers: { host: "www.zexi.me" },
-  });
-  assert.equal(response.status, 200);
   assert.equal(await response.text(), "<h1>home</h1>");
 });
 

@@ -75,10 +75,6 @@ export function normalizeHost(value: string | undefined): string | null {
   return host;
 }
 
-export function storageHostFor(host: string): string {
-  return host.startsWith("www.") ? host.slice(4) : host;
-}
-
 function decodePathname(value: string): string | null {
   let pathname;
   try {
@@ -226,12 +222,10 @@ export function createHandler(options: StaticOptions = {}) {
         plain(res, 400, "bad request");
         return;
       }
-      const storageHost = storageHostFor(host);
-
       const requestedPath = pathname.endsWith("/")
         ? `${pathname}index.html`
         : pathname;
-      let upstream = await fetchObject(context, req, storageHost, requestedPath);
+      let upstream = await fetchObject(context, req, host, requestedPath);
 
       if (
         upstream.status === 404 &&
@@ -240,7 +234,7 @@ export function createHandler(options: StaticOptions = {}) {
       ) {
         upstream.body?.cancel();
         const indexPath = `${pathname}/index.html`;
-        upstream = await fetchObject(context, req, storageHost, indexPath);
+        upstream = await fetchObject(context, req, host, indexPath);
         if (upstream.ok) {
           upstream.body?.cancel();
           res.writeHead(308, {
@@ -257,7 +251,7 @@ export function createHandler(options: StaticOptions = {}) {
         const notFound = await fetchObject(
           context,
           req,
-          storageHost,
+          host,
           "/404.html",
         );
         if (notFound.ok) {
