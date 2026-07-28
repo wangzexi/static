@@ -25,7 +25,7 @@ const objects = new Map([
     },
   ],
   [
-    "/sites/zexi.me/assets/app.12345678.js",
+    "/sites/zexi.me/assets/app.Dewnqifn.js",
     {
       body: "console.log('ok')",
       headers: {
@@ -147,7 +147,7 @@ test("serves directory index files", async () => {
 });
 
 test("uses immutable caching for hashed assets", async () => {
-  const response = await request("/assets/app.12345678.js");
+  const response = await request("/assets/app.Dewnqifn.js");
   assert.equal(response.status, 200);
   assert.equal(
     response.headers.get("cache-control"),

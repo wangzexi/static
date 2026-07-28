@@ -86,8 +86,9 @@ function encodeObjectKey(host, pathname) {
 function cacheControlFor(pathname, upstreamValue) {
   if (pathname.endsWith(".html")) return "no-cache";
   if (
-    /(?:^|\/)[^/]*[.-][a-f0-9]{8,}[.-][^/]+$/i.test(pathname) ||
-    /(?:^|\/)assets\/[^/]*[.-][a-f0-9]{8,}(?:[.-]|$)/i.test(pathname)
+    pathname.startsWith("/assets/") ||
+    pathname.startsWith("/_astro/") ||
+    /(?:^|\/)[^/]*[.-][a-z0-9_-]{8,}[.-][^/]+$/i.test(pathname)
   ) {
     return "public, max-age=31536000, immutable";
   }
