@@ -1,5 +1,6 @@
 import http from "node:http";
 import { Readable } from "node:stream";
+import type { IncomingMessage, ServerResponse } from "node:http";
 
 const DEFAULT_PORT = 8080;
 const FORWARDED_REQUEST_HEADERS = [
@@ -19,20 +20,34 @@ const FORWARDED_RESPONSE_HEADERS = [
   "last-modified",
 ];
 
-function normalizeEndpoint(value) {
+type FetchLike = typeof globalThis.fetch;
+
+export interface StaticOptions {
+  endpoint?: string;
+  bucket?: string;
+  fetch?: FetchLike;
+}
+
+interface StaticContext {
+  endpoint: URL;
+  bucket: string;
+  fetch: FetchLike;
+}
+
+function normalizeEndpoint(value: string): URL {
   const endpoint = new URL(value);
   endpoint.pathname = endpoint.pathname.replace(/\/+$/, "");
   return endpoint;
 }
 
-function normalizeBucket(value) {
+function normalizeBucket(value: string): string {
   if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(value)) {
     throw new Error("S3_BUCKET must be a valid S3 bucket name");
   }
   return value;
 }
 
-export function normalizeHost(value) {
+export function normalizeHost(value: string | undefined): string | null {
   if (!value) return null;
 
   let host = value.trim().toLowerCase();
@@ -60,7 +75,11 @@ export function normalizeHost(value) {
   return host;
 }
 
-function decodePathname(value) {
+export function storageHostFor(host: string): string {
+  return host.startsWith("www.") ? host.slice(4) : host;
+}
+
+function decodePathname(value: string): string | null {
   let pathname;
   try {
     pathname = decodeURIComponent(new URL(value, "http://static.invalid").pathname);
@@ -78,12 +97,15 @@ function decodePathname(value) {
   return pathname;
 }
 
-function encodeObjectKey(host, pathname) {
+function encodeObjectKey(host: string, pathname: string): string {
   const parts = [host, ...pathname.split("/").filter(Boolean)];
   return parts.map(encodeURIComponent).join("/");
 }
 
-function cacheControlFor(pathname, upstreamValue) {
+function cacheControlFor(
+  pathname: string,
+  upstreamValue: string | null,
+): string {
   if (pathname.endsWith(".html")) return "no-cache";
   if (
     pathname.startsWith("/assets/") ||
@@ -95,7 +117,7 @@ function cacheControlFor(pathname, upstreamValue) {
   return upstreamValue || "public, max-age=3600";
 }
 
-function requestHeaders(req) {
+function requestHeaders(req: IncomingMessage): Headers {
   const headers = new Headers();
   for (const name of FORWARDED_REQUEST_HEADERS) {
     const value = req.headers[name];
@@ -104,7 +126,12 @@ function requestHeaders(req) {
   return headers;
 }
 
-async function fetchObject(context, req, host, pathname) {
+async function fetchObject(
+  context: StaticContext,
+  req: IncomingMessage,
+  host: string,
+  pathname: string,
+): Promise<Response> {
   const url = new URL(context.endpoint);
   const basePath = context.endpoint.pathname.replace(/\/+$/, "");
   url.pathname = `${basePath}/${encodeURIComponent(context.bucket)}/${encodeObjectKey(host, pathname)}`;
@@ -117,7 +144,11 @@ async function fetchObject(context, req, host, pathname) {
   });
 }
 
-function copyHeaders(upstream, res, pathname) {
+function copyHeaders(
+  upstream: Response,
+  res: ServerResponse,
+  pathname: string,
+): void {
   for (const name of FORWARDED_RESPONSE_HEADERS) {
     const value = upstream.headers.get(name);
     if (value) res.setHeader(name, value);
@@ -129,17 +160,26 @@ function copyHeaders(upstream, res, pathname) {
   res.setHeader("x-content-type-options", "nosniff");
 }
 
-async function sendUpstream(upstream, req, res, pathname, status = upstream.status) {
+async function sendUpstream(
+  upstream: Response,
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  status = upstream.status,
+): Promise<void> {
   res.statusCode = status;
   copyHeaders(upstream, res, pathname);
 
-  if (req.method === "HEAD" || status === 304 || !upstream.body) {
+  const body = upstream.body;
+  if (req.method === "HEAD" || status === 304 || !body) {
     res.end();
     return;
   }
 
   await new Promise((resolve, reject) => {
-    Readable.fromWeb(upstream.body)
+    Readable.fromWeb(
+      body as unknown as import("node:stream/web").ReadableStream,
+    )
       .on("error", reject)
       .pipe(res)
       .on("finish", resolve)
@@ -147,7 +187,7 @@ async function sendUpstream(upstream, req, res, pathname, status = upstream.stat
   });
 }
 
-function plain(res, status, message) {
+function plain(res: ServerResponse, status: number, message: string): void {
   res.writeHead(status, {
     "cache-control": "no-store",
     "content-type": "text/plain; charset=utf-8",
@@ -156,8 +196,8 @@ function plain(res, status, message) {
   res.end(`${message}\n`);
 }
 
-export function createHandler(options = {}) {
-  const context = {
+export function createHandler(options: StaticOptions = {}) {
+  const context: StaticContext = {
     endpoint: normalizeEndpoint(
       options.endpoint || process.env.S3_ENDPOINT || "http://minio.minio.svc.cluster.local:9000",
     ),
@@ -165,7 +205,10 @@ export function createHandler(options = {}) {
     fetch: options.fetch || globalThis.fetch,
   };
 
-  return async function handler(req, res) {
+  return async function handler(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
     try {
       if (req.url === "/healthz" || req.url === "/readyz") {
         plain(res, 200, "ok");
@@ -178,30 +221,31 @@ export function createHandler(options = {}) {
       }
 
       const host = normalizeHost(req.headers.host);
-      const pathname = decodePathname(req.url);
+      const pathname = decodePathname(req.url ?? "/");
       if (!host || pathname === null) {
         plain(res, 400, "bad request");
         return;
       }
+      const storageHost = storageHostFor(host);
 
       const requestedPath = pathname.endsWith("/")
         ? `${pathname}index.html`
         : pathname;
-      let upstream = await fetchObject(context, req, host, requestedPath);
+      let upstream = await fetchObject(context, req, storageHost, requestedPath);
 
       if (
         upstream.status === 404 &&
         !pathname.endsWith("/") &&
-        !pathname.split("/").at(-1).includes(".")
+        !(pathname.split("/").at(-1)?.includes(".") ?? false)
       ) {
         upstream.body?.cancel();
         const indexPath = `${pathname}/index.html`;
-        upstream = await fetchObject(context, req, host, indexPath);
+        upstream = await fetchObject(context, req, storageHost, indexPath);
         if (upstream.ok) {
           upstream.body?.cancel();
           res.writeHead(308, {
             "cache-control": "no-cache",
-            location: `${pathname}/${new URL(req.url, "http://static.invalid").search}`,
+            location: `${pathname}/${new URL(req.url ?? "/", "http://static.invalid").search}`,
           });
           res.end();
           return;
@@ -210,7 +254,12 @@ export function createHandler(options = {}) {
 
       if (upstream.status === 404) {
         upstream.body?.cancel();
-        const notFound = await fetchObject(context, req, host, "/404.html");
+        const notFound = await fetchObject(
+          context,
+          req,
+          storageHost,
+          "/404.html",
+        );
         if (notFound.ok) {
           await sendUpstream(notFound, req, res, "/404.html", 404);
           return;
@@ -227,7 +276,7 @@ export function createHandler(options = {}) {
       }
 
       await sendUpstream(upstream, req, res, requestedPath);
-    } catch (error) {
+    } catch (error: unknown) {
       console.error(error);
       if (!res.headersSent) plain(res, 502, "storage unavailable");
       else res.destroy();
@@ -235,11 +284,11 @@ export function createHandler(options = {}) {
   };
 }
 
-export function createStaticServer(options = {}) {
+export function createStaticServer(options: StaticOptions = {}): http.Server {
   return http.createServer(createHandler(options));
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
   const port = Number.parseInt(process.env.PORT || `${DEFAULT_PORT}`, 10);
   const server = createStaticServer();
   server.listen(port, "0.0.0.0", () => {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import http from "node:http";
-import { createStaticServer } from "../src/server.mjs";
+import type { AddressInfo } from "node:net";
+import { createStaticServer } from "../src/server.ts";
 
 const endpoint = process.env.S3_ENDPOINT;
 if (!endpoint) {
@@ -12,16 +13,32 @@ const gateway = createStaticServer({
   bucket: process.env.S3_BUCKET || "sites",
 });
 
-await new Promise((resolve, reject) => {
+await new Promise<void>((resolve, reject) => {
   gateway.once("error", reject);
-  gateway.listen(0, "127.0.0.1", resolve);
+  gateway.listen(0, "127.0.0.1", () => resolve());
 });
 
-function request(host, path, options = {}) {
+interface RequestOptions {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+}
+
+interface IntegrationResponse {
+  status: number | undefined;
+  headers: http.IncomingHttpHeaders;
+  body: string;
+}
+
+function request(
+  host: string,
+  path: string,
+  options: RequestOptions = {},
+): Promise<IntegrationResponse> {
   return new Promise((resolve, reject) => {
     const req = http.request({
       hostname: "127.0.0.1",
-      port: gateway.address().port,
+      port: (gateway.address() as AddressInfo).port,
       path,
       method: options.method || "GET",
       headers: {
@@ -31,8 +48,8 @@ function request(host, path, options = {}) {
     });
     req.on("error", reject);
     req.on("response", (res) => {
-      const chunks = [];
-      res.on("data", (chunk) => chunks.push(chunk));
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
       res.on("end", () => {
         resolve({
           status: res.statusCode,
@@ -49,6 +66,7 @@ function request(host, path, options = {}) {
 try {
   const roots = [
     ["zexi.me", "思考的扰动"],
+    ["www.zexi.me", "思考的扰动"],
     ["wzx6.cn", "站点建设中"],
     ["www.wzx6.cn", "站点建设中"],
     ["cheer.world", "Cheer 星球"],
@@ -71,7 +89,7 @@ try {
     "/assets/index-Dewnqifn.js",
   );
   assert.equal(asset.status, 200);
-  assert.match(asset.headers["content-type"], /javascript/);
+  assert.match(asset.headers["content-type"] ?? "", /javascript/);
   assert.equal(
     asset.headers["cache-control"],
     "public, max-age=31536000, immutable",
@@ -79,10 +97,11 @@ try {
 
   const root = await request("zexi.me", "/");
   assert.equal(root.headers["cache-control"], "no-cache");
-  assert.ok(root.headers.etag);
+  const etag = root.headers.etag;
+  if (typeof etag !== "string") throw new Error("zexi.me ETag is missing");
 
   const conditional = await request("zexi.me", "/", {
-    headers: { "if-none-match": root.headers.etag },
+    headers: { "if-none-match": etag },
   });
   assert.equal(conditional.status, 304);
 
@@ -96,7 +115,7 @@ try {
   assert.equal(write.status, 405);
 
   console.log(
-    "integration checks passed: roots=4 article=1 asset=1 etag=1 404=1 method=1",
+    "integration checks passed: roots=5 article=1 asset=1 etag=1 404=1 method=1",
   );
 } finally {
   gateway.closeAllConnections();

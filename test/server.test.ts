@@ -1,9 +1,19 @@
 import assert from "node:assert/strict";
 import http from "node:http";
+import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
-import { createStaticServer, normalizeHost } from "../src/server.mjs";
+import {
+  createStaticServer,
+  normalizeHost,
+  storageHostFor,
+} from "../src/server.ts";
 
-const objects = new Map([
+interface StoredObject {
+  body: string;
+  headers: Record<string, string>;
+}
+
+const objects = new Map<string, StoredObject>([
   [
     "/sites/zexi.me/index.html",
     {
@@ -42,14 +52,14 @@ const objects = new Map([
     },
   ],
 ]);
-let storage;
-let gateway;
-let storageUrl;
-let gatewayUrl;
+let storage: http.Server;
+let gateway: http.Server;
+let storageUrl: string;
+let gatewayUrl: string;
 
 before(async () => {
   storage = http.createServer((req, res) => {
-    const object = objects.get(req.url);
+    const object = objects.get(req.url ?? "/");
     if (!object) {
       res.writeHead(404);
       res.end();
@@ -66,12 +76,16 @@ before(async () => {
     res.writeHead(200, object.headers);
     res.end(req.method === "HEAD" ? undefined : object.body);
   });
-  await new Promise((resolve) => storage.listen(0, "127.0.0.1", resolve));
-  storageUrl = `http://127.0.0.1:${storage.address().port}`;
+  await new Promise<void>((resolve) => {
+    storage.listen(0, "127.0.0.1", () => resolve());
+  });
+  storageUrl = `http://127.0.0.1:${(storage.address() as AddressInfo).port}`;
 
   gateway = createStaticServer({ endpoint: storageUrl, bucket: "sites" });
-  await new Promise((resolve) => gateway.listen(0, "127.0.0.1", resolve));
-  gatewayUrl = `http://127.0.0.1:${gateway.address().port}`;
+  await new Promise<void>((resolve) => {
+    gateway.listen(0, "127.0.0.1", () => resolve());
+  });
+  gatewayUrl = `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`;
 });
 
 after(async () => {
@@ -81,12 +95,29 @@ after(async () => {
   ]);
 });
 
-async function request(path, options = {}) {
+interface RequestOptions {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+}
+
+interface TestResponse {
+  status: number | undefined;
+  headers: {
+    get(name: string): string | null;
+  };
+  text(): Promise<string>;
+}
+
+async function request(
+  path: string,
+  options: RequestOptions = {},
+): Promise<TestResponse> {
   const url = new URL(path, gatewayUrl);
   return new Promise((resolve, reject) => {
     const req = http.request({
       hostname: url.hostname,
-      port: url.port,
+      port: Number(url.port),
       path: `${url.pathname}${url.search}`,
       method: options.method || "GET",
       headers: {
@@ -96,14 +127,14 @@ async function request(path, options = {}) {
     });
     req.on("error", reject);
     req.on("response", (res) => {
-      const chunks = [];
-      res.on("data", (chunk) => chunks.push(chunk));
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
       res.on("end", () => {
         const body = Buffer.concat(chunks);
         resolve({
           status: res.statusCode,
           headers: {
-            get(name) {
+            get(name: string): string | null {
               const value = res.headers[name.toLowerCase()];
               return Array.isArray(value) ? value.join(", ") : value ?? null;
             },
@@ -126,11 +157,24 @@ test("normalizes valid host names and rejects unsafe ones", () => {
   assert.equal(normalizeHost("../zexi.me"), null);
 });
 
+test("maps www hosts to the same storage directory as the apex host", () => {
+  assert.equal(storageHostFor("www.zexi.me"), "zexi.me");
+  assert.equal(storageHostFor("zexi.me"), "zexi.me");
+});
+
 test("serves the site index by Host", async () => {
   const response = await request("/");
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("cache-control"), "no-cache");
   assert.equal(response.headers.get("etag"), '"home-v1"');
+  assert.equal(await response.text(), "<h1>home</h1>");
+});
+
+test("serves www from the apex host directory", async () => {
+  const response = await request("/", {
+    headers: { host: "www.zexi.me" },
+  });
+  assert.equal(response.status, 200);
   assert.equal(await response.text(), "<h1>home</h1>");
 });
 

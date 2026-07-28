@@ -1,12 +1,12 @@
-FROM node:24-alpine
+FROM oven/bun:1.3.14-distroless
 
-ENV NODE_ENV=production
 WORKDIR /app
 
-COPY package.json ./
-COPY src ./src
+COPY --chown=bun:bun package.json ./
+COPY --chown=bun:bun src ./src
 
-USER node
+USER bun
 EXPOSE 8080
 
-CMD ["node", "src/server.mjs"]
+ENTRYPOINT ["bun"]
+CMD ["src/server.ts"]
