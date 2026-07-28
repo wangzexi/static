@@ -1,7 +1,3 @@
-import http from "node:http";
-import { Readable } from "node:stream";
-import type { IncomingMessage, ServerResponse } from "node:http";
-
 const DEFAULT_PORT = 8080;
 const FORWARDED_REQUEST_HEADERS = [
   "if-match",
@@ -28,6 +24,11 @@ export interface StaticOptions {
   fetch?: FetchLike;
 }
 
+export interface StaticServerOptions extends StaticOptions {
+  hostname?: string;
+  port?: number;
+}
+
 interface StaticContext {
   endpoint: URL;
   bucket: string;
@@ -47,7 +48,9 @@ function normalizeBucket(value: string): string {
   return value;
 }
 
-export function normalizeHost(value: string | undefined): string | null {
+export function normalizeHost(
+  value: string | null | undefined,
+): string | null {
   if (!value) return null;
 
   let host = value.trim().toLowerCase();
@@ -78,7 +81,7 @@ export function normalizeHost(value: string | undefined): string | null {
 function decodePathname(value: string): string | null {
   let pathname;
   try {
-    pathname = decodeURIComponent(new URL(value, "http://static.invalid").pathname);
+    pathname = decodeURIComponent(value);
   } catch {
     return null;
   }
@@ -113,18 +116,18 @@ function cacheControlFor(
   return upstreamValue || "public, max-age=3600";
 }
 
-function requestHeaders(req: IncomingMessage): Headers {
+function requestHeaders(request: Request): Headers {
   const headers = new Headers();
   for (const name of FORWARDED_REQUEST_HEADERS) {
-    const value = req.headers[name];
-    if (typeof value === "string") headers.set(name, value);
+    const value = request.headers.get(name);
+    if (value) headers.set(name, value);
   }
   return headers;
 }
 
 async function fetchObject(
   context: StaticContext,
-  req: IncomingMessage,
+  request: Request,
   host: string,
   pathname: string,
 ): Promise<Response> {
@@ -134,158 +137,145 @@ async function fetchObject(
   url.search = "";
 
   return context.fetch(url, {
-    method: req.method,
-    headers: requestHeaders(req),
+    method: request.method,
+    headers: requestHeaders(request),
     redirect: "manual",
   });
 }
 
-function copyHeaders(
-  upstream: Response,
-  res: ServerResponse,
-  pathname: string,
-): void {
+function responseHeaders(upstream: Response, pathname: string): Headers {
+  const headers = new Headers();
   for (const name of FORWARDED_RESPONSE_HEADERS) {
     const value = upstream.headers.get(name);
-    if (value) res.setHeader(name, value);
+    if (value) headers.set(name, value);
   }
-  res.setHeader(
+  headers.set(
     "cache-control",
     cacheControlFor(pathname, upstream.headers.get("cache-control")),
   );
-  res.setHeader("x-content-type-options", "nosniff");
+  headers.set("x-content-type-options", "nosniff");
+  return headers;
 }
 
-async function sendUpstream(
+function sendUpstream(
   upstream: Response,
-  req: IncomingMessage,
-  res: ServerResponse,
+  request: Request,
   pathname: string,
   status = upstream.status,
-): Promise<void> {
-  res.statusCode = status;
-  copyHeaders(upstream, res, pathname);
-
-  const body = upstream.body;
-  if (req.method === "HEAD" || status === 304 || !body) {
-    res.end();
-    return;
-  }
-
-  await new Promise((resolve, reject) => {
-    Readable.fromWeb(
-      body as unknown as import("node:stream/web").ReadableStream,
-    )
-      .on("error", reject)
-      .pipe(res)
-      .on("finish", resolve)
-      .on("error", reject);
+): Response {
+  const body =
+    request.method === "HEAD" || status === 304 ? null : upstream.body;
+  return new Response(body, {
+    status,
+    headers: responseHeaders(upstream, pathname),
   });
 }
 
-function plain(res: ServerResponse, status: number, message: string): void {
-  res.writeHead(status, {
-    "cache-control": "no-store",
-    "content-type": "text/plain; charset=utf-8",
-    "x-content-type-options": "nosniff",
-  });
-  res.end(`${message}\n`);
+function plain(
+  status: number,
+  message: string,
+  extraHeaders?: HeadersInit,
+): Response {
+  const headers = new Headers(extraHeaders);
+  headers.set("cache-control", "no-store");
+  headers.set("content-type", "text/plain; charset=utf-8");
+  headers.set("x-content-type-options", "nosniff");
+  return new Response(`${message}\n`, { status, headers });
 }
 
 export function createHandler(options: StaticOptions = {}) {
   const context: StaticContext = {
     endpoint: normalizeEndpoint(
-      options.endpoint || process.env.S3_ENDPOINT || "http://minio.minio.svc.cluster.local:9000",
+      options.endpoint ||
+        process.env.S3_ENDPOINT ||
+        "http://minio.minio.svc.cluster.local:9000",
     ),
     bucket: normalizeBucket(options.bucket || process.env.S3_BUCKET || "sites"),
     fetch: options.fetch || globalThis.fetch,
   };
 
-  return async function handler(
-    req: IncomingMessage,
-    res: ServerResponse,
-  ): Promise<void> {
+  return async function handler(request: Request): Promise<Response> {
     try {
-      if (req.url === "/healthz" || req.url === "/readyz") {
-        plain(res, 200, "ok");
-        return;
+      const requestUrl = new URL(request.url);
+      if (
+        requestUrl.pathname === "/healthz" ||
+        requestUrl.pathname === "/readyz"
+      ) {
+        return plain(200, "ok");
       }
-      if (req.method !== "GET" && req.method !== "HEAD") {
-        res.setHeader("allow", "GET, HEAD");
-        plain(res, 405, "method not allowed");
-        return;
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        return plain(405, "method not allowed", { allow: "GET, HEAD" });
       }
 
-      const host = normalizeHost(req.headers.host);
-      const pathname = decodePathname(req.url ?? "/");
+      const host = normalizeHost(request.headers.get("host"));
+      const pathname = decodePathname(requestUrl.pathname);
       if (!host || pathname === null) {
-        plain(res, 400, "bad request");
-        return;
+        return plain(400, "bad request");
       }
+
       const requestedPath = pathname.endsWith("/")
         ? `${pathname}index.html`
         : pathname;
-      let upstream = await fetchObject(context, req, host, requestedPath);
+      let upstream = await fetchObject(context, request, host, requestedPath);
 
       if (
         upstream.status === 404 &&
         !pathname.endsWith("/") &&
         !(pathname.split("/").at(-1)?.includes(".") ?? false)
       ) {
-        upstream.body?.cancel();
+        await upstream.body?.cancel();
         const indexPath = `${pathname}/index.html`;
-        upstream = await fetchObject(context, req, host, indexPath);
+        upstream = await fetchObject(context, request, host, indexPath);
         if (upstream.ok) {
-          upstream.body?.cancel();
-          res.writeHead(308, {
-            "cache-control": "no-cache",
-            location: `${pathname}/${new URL(req.url ?? "/", "http://static.invalid").search}`,
+          await upstream.body?.cancel();
+          return new Response(null, {
+            status: 308,
+            headers: {
+              "cache-control": "no-cache",
+              location: `${requestUrl.pathname}/${requestUrl.search}`,
+            },
           });
-          res.end();
-          return;
         }
       }
 
       if (upstream.status === 404) {
-        upstream.body?.cancel();
+        await upstream.body?.cancel();
         const notFound = await fetchObject(
           context,
-          req,
+          request,
           host,
           "/404.html",
         );
         if (notFound.ok) {
-          await sendUpstream(notFound, req, res, "/404.html", 404);
-          return;
+          return sendUpstream(notFound, request, "/404.html", 404);
         }
-        notFound.body?.cancel();
-        plain(res, 404, "not found");
-        return;
+        await notFound.body?.cancel();
+        return plain(404, "not found");
       }
 
       if (!upstream.ok && upstream.status !== 304 && upstream.status !== 206) {
-        upstream.body?.cancel();
-        plain(res, 502, "storage unavailable");
-        return;
+        await upstream.body?.cancel();
+        return plain(502, "storage unavailable");
       }
 
-      await sendUpstream(upstream, req, res, requestedPath);
+      return sendUpstream(upstream, request, requestedPath);
     } catch (error: unknown) {
       console.error(error);
-      if (!res.headersSent) plain(res, 502, "storage unavailable");
-      else res.destroy();
+      return plain(502, "storage unavailable");
     }
   };
 }
 
-export function createStaticServer(options: StaticOptions = {}): http.Server {
-  return http.createServer(createHandler(options));
+export function createStaticServer(options: StaticServerOptions = {}) {
+  return Bun.serve({
+    hostname: options.hostname || "0.0.0.0",
+    port: options.port ?? DEFAULT_PORT,
+    fetch: createHandler(options),
+  });
 }
 
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.main) {
   const port = Number.parseInt(process.env.PORT || `${DEFAULT_PORT}`, 10);
-  const server = createStaticServer();
-  server.listen(port, "0.0.0.0", () => {
-    console.log(`static listening on :${port}`);
-  });
+  createStaticServer({ port });
+  console.log(`static listening on :${port}`);
 }

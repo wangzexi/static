@@ -37,4 +37,5 @@ bun start
 ```
 
 源码、单元测试和真实 MinIO 集成测试均使用 TypeScript，由 Bun 直接运行。
+HTTP 层使用原生 `Bun.serve()` 和 Web 标准的 `Request`、`Response`、`ReadableStream`。
 生产镜像使用 Bun distroless，运行时不安装 npm 依赖。

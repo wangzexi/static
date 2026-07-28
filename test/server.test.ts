@@ -1,6 +1,4 @@
 import assert from "node:assert/strict";
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import {
   createStaticServer,
@@ -51,47 +49,44 @@ const objects = new Map<string, StoredObject>([
     },
   ],
 ]);
-let storage: http.Server;
-let gateway: http.Server;
-let storageUrl: string;
+
+let storage: Bun.Server<undefined>;
+let gateway: Bun.Server<undefined>;
 let gatewayUrl: string;
 
-before(async () => {
-  storage = http.createServer((req, res) => {
-    const object = objects.get(req.url ?? "/");
-    if (!object) {
-      res.writeHead(404);
-      res.end();
-      return;
-    }
-    if (
-      object.headers.etag &&
-      req.headers["if-none-match"] === object.headers.etag
-    ) {
-      res.writeHead(304, object.headers);
-      res.end();
-      return;
-    }
-    res.writeHead(200, object.headers);
-    res.end(req.method === "HEAD" ? undefined : object.body);
+before(() => {
+  storage = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const object = objects.get(new URL(request.url).pathname);
+      if (!object) return new Response(null, { status: 404 });
+      if (
+        object.headers.etag &&
+        request.headers.get("if-none-match") === object.headers.etag
+      ) {
+        return new Response(null, {
+          status: 304,
+          headers: object.headers,
+        });
+      }
+      return new Response(request.method === "HEAD" ? null : object.body, {
+        headers: object.headers,
+      });
+    },
   });
-  await new Promise<void>((resolve) => {
-    storage.listen(0, "127.0.0.1", () => resolve());
-  });
-  storageUrl = `http://127.0.0.1:${(storage.address() as AddressInfo).port}`;
 
-  gateway = createStaticServer({ endpoint: storageUrl, bucket: "sites" });
-  await new Promise<void>((resolve) => {
-    gateway.listen(0, "127.0.0.1", () => resolve());
+  gateway = createStaticServer({
+    endpoint: `http://127.0.0.1:${storage.port}`,
+    bucket: "sites",
+    hostname: "127.0.0.1",
+    port: 0,
   });
-  gatewayUrl = `http://127.0.0.1:${(gateway.address() as AddressInfo).port}`;
+  gatewayUrl = `http://127.0.0.1:${gateway.port}`;
 });
 
 after(async () => {
-  await Promise.all([
-    new Promise((resolve) => gateway.close(resolve)),
-    new Promise((resolve) => storage.close(resolve)),
-  ]);
+  await Promise.all([gateway.stop(true), storage.stop(true)]);
 });
 
 interface RequestOptions {
@@ -100,52 +95,18 @@ interface RequestOptions {
   body?: string;
 }
 
-interface TestResponse {
-  status: number | undefined;
-  headers: {
-    get(name: string): string | null;
-  };
-  text(): Promise<string>;
-}
-
-async function request(
+function request(
   path: string,
   options: RequestOptions = {},
-): Promise<TestResponse> {
-  const url = new URL(path, gatewayUrl);
-  return new Promise((resolve, reject) => {
-    const req = http.request({
-      hostname: url.hostname,
-      port: Number(url.port),
-      path: `${url.pathname}${url.search}`,
-      method: options.method || "GET",
-      headers: {
-        host: "zexi.me",
-        ...options.headers,
-      },
-    });
-    req.on("error", reject);
-    req.on("response", (res) => {
-      const chunks: Buffer[] = [];
-      res.on("data", (chunk: Buffer) => chunks.push(chunk));
-      res.on("end", () => {
-        const body = Buffer.concat(chunks);
-        resolve({
-          status: res.statusCode,
-          headers: {
-            get(name: string): string | null {
-              const value = res.headers[name.toLowerCase()];
-              return Array.isArray(value) ? value.join(", ") : value ?? null;
-            },
-          },
-          async text() {
-            return body.toString();
-          },
-        });
-      });
-    });
-    if (options.body) req.write(options.body);
-    req.end();
+): Promise<Response> {
+  return fetch(new URL(path, gatewayUrl), {
+    method: options.method || "GET",
+    headers: {
+      host: "zexi.me",
+      ...options.headers,
+    },
+    body: options.body,
+    redirect: "manual",
   });
 }
 
@@ -162,6 +123,13 @@ test("serves the site index by Host", async () => {
   assert.equal(response.headers.get("cache-control"), "no-cache");
   assert.equal(response.headers.get("etag"), '"home-v1"');
   assert.equal(await response.text(), "<h1>home</h1>");
+});
+
+test("supports HEAD without returning a body", async () => {
+  const response = await request("/", { method: "HEAD" });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("etag"), '"home-v1"');
+  assert.equal(await response.text(), "");
 });
 
 test("redirects extensionless directory paths to a trailing slash", async () => {
