@@ -1,12 +1,16 @@
-FROM oven/bun:1.3.14-distroless
+FROM rust:1.85-alpine AS build
 
 WORKDIR /app
+RUN apk add --no-cache build-base musl-dev
 
-COPY --chown=bun:bun package.json ./
-COPY --chown=bun:bun src ./src
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo build --release --target x86_64-unknown-linux-musl
 
-USER bun
+FROM scratch
+
+COPY --from=build /app/target/x86_64-unknown-linux-musl/release/static-gateway /static-gateway
+
+USER 1000:1000
 EXPOSE 8080
-
-ENTRYPOINT ["bun"]
-CMD ["src/server.ts"]
+ENTRYPOINT ["/static-gateway"]
