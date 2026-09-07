@@ -262,7 +262,7 @@ fn upstream_response(
         .body(body)
         .expect("valid upstream response");
     *response.headers_mut() = headers;
-    response
+    with_cors(response)
 }
 
 fn plain(status: StatusCode, message: &str) -> Response {
@@ -278,7 +278,7 @@ fn plain(status: StatusCode, message: &str) -> Response {
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
-    response
+    with_cors(response)
 }
 
 fn redirect(location: &str) -> Response {
@@ -290,6 +290,33 @@ fn redirect(location: &str) -> Response {
     if let Ok(value) = HeaderValue::from_str(location) {
         response.headers_mut().insert(header::LOCATION, value);
     }
+    with_cors(response)
+}
+
+fn preflight() -> Response {
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = StatusCode::NO_CONTENT;
+    with_cors(response)
+}
+
+fn with_cors(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, HEAD, OPTIONS"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("*"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_MAX_AGE,
+        HeaderValue::from_static("86400"),
+    );
     response
 }
 
@@ -300,6 +327,9 @@ fn upstream_status(status: reqwest::StatusCode) -> StatusCode {
 async fn handler(State(state): State<AppState>, request: Request<Body>) -> Response {
     let method = request.method().clone();
     let uri = request.uri().clone();
+    if method == Method::OPTIONS {
+        return preflight();
+    }
     if uri.path() == "/healthz" || uri.path() == "/readyz" {
         return plain(StatusCode::OK, "ok");
     }
@@ -565,6 +595,13 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "*"
+        );
+        assert_eq!(
             response.headers().get(header::CACHE_CONTROL).unwrap(),
             "no-cache"
         );
@@ -574,6 +611,35 @@ mod tests {
                 .unwrap()
                 .as_ref(),
             b"<h1>home</h1>"
+        );
+
+        let response = gateway
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/example.js")
+                    .method(Method::OPTIONS)
+                    .header(header::HOST, "zexi.me")
+                    .header(header::ORIGIN, "https://cheer.world")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .unwrap(),
+            "*"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+                .unwrap(),
+            "GET, HEAD, OPTIONS"
         );
 
         let response = gateway
