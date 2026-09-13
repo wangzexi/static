@@ -23,6 +23,12 @@ GET https://zexi.me/articles/hello/
 
 ## 环境变量
 
+zexi.me 的 `/llms.txt` 动态输出 Markdown 内容流，支持 `offset`（默认 0）、
+`limit`（默认 20，范围 1–100）。请求从内存快照读取内容，普通分页链接携带这两个参数。
+启动时和每日北京时间 06:00 从 MinIO 刷新完整快照，不依赖数据库，也不在镜像中打包内容。
+更新内容只需发布静态文件；修改网关逻辑才需要重新构建镜像。
+旧 `/llm`、`/llm.md`、`/index.md`、`/rss.xml`、`/articles.json` 返回 410。
+
 ~~~text
 PORT=8080
 S3_ENDPOINT=http://minio.minio.svc.cluster.local:9000
@@ -38,3 +44,14 @@ cargo run
 
 HTTP 层使用 Axum，MinIO 请求使用 reqwest。生产镜像使用 musl 静态链接
 二进制和 scratch，运行时不包含 shell、包管理器或语言运行时。
+# Notes cache
+
+`zexi.me` homepage, `/llms.txt` and `/feed/runtime/{version}/page-N.json` are rendered by this same Rust process from `sites/zexi.me/feed/all.json`. Startup and 06:00 Asia/Shanghai refresh the complete in-memory cache. Requests never fetch feed data from S3. Refresh failure retains the previous valid cache; one older version is retained for active scrolling sessions. No database or extra runtime is required.
+
+Presentation assets are `notes-template.html` and `notes-emojis.json`, built by the blog frontend's `npm run build:runtime`. Daily content publishing changes only JSON/media, not the image or HTML shell. Resume and other hosts keep their static serving behavior.
+
+## Historical note search
+
+The homepage searches all cached note bodies, titles, and quoted text; the resume is excluded. `/feed/search.json?q=AI` returns rendered results with `total`, `offset`, `nextOffset`, and `snapshotId`. `/llms.txt?q=AI` returns the same matches as Markdown. Both accept `regex=1` for a Rust regular expression, `offset` (default 0), `limit` (default 20, range 1–100), and optional `snapshot` for consistent pagination across a refresh. Markdown next-page links preserve the query and snapshot. With no `q`, `/llms.txt` returns the first 20 notes, matching the homepage; its introduction shows pagination/search URLs and its footer links to the next page.
+
+Keyword search is a literal, case-insensitive substring match. Regular expressions are also case-insensitive by default, support alternation such as `贝叶斯|概率`, and do not support look-around or backreferences. Queries are limited to 2048 UTF-8 bytes and compiled expressions to 1 MB. Invalid queries return 400; expired snapshots return 409. Search uses only the existing in-memory cache and never invokes a model or reads S3 at request time.
