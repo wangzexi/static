@@ -231,7 +231,7 @@ fn render_item(item: &Value, emojis: &Value) -> Result<(String, String), String>
                 if url.scheme() == "https" && matches!(url.host_str(), Some("x.com" | "www.x.com"))
                 {
                     labels.push_str(&format!(
-                        "<a href=\"{}\" target=\"_blank\" rel=\"noopener\">原文</a>",
+                        "<a class=\"feed-origin\" href=\"{}\" target=\"_blank\" rel=\"noopener\">X</a>",
                         escape(url.as_str())
                     ));
                 }
