@@ -1,5 +1,7 @@
 # static
 
+> 退役说明：zexi.me 首页服务已经迁移到 [`wangzexi/zexi-me`](https://github.com/wangzexi/zexi-me)。本仓库只保留历史版本和回滚参考，不再作为集群首页镜像的源码入口。
+
 面向个人 K3s 集群的极小静态网站网关，使用 Rust、Axum 和 reqwest
 实现。它把请求的 Host 直接映射到 S3 bucket 中的同名目录，不维护站点
 配置文件，也不提供 SPA fallback。
