@@ -14,7 +14,6 @@ use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, percent_encode};
 use reqwest::Client;
 use tracing::{error, info};
 use url::Url;
-mod notes;
 
 const DEFAULT_PORT: u16 = 8080;
 const URI_COMPONENT: &AsciiSet = &CONTROLS
@@ -64,7 +63,6 @@ struct AppState {
     endpoint: String,
     bucket: String,
     client: Client,
-    notes: std::sync::Arc<std::sync::RwLock<notes::Store>>,
 }
 
 impl AppState {
@@ -84,7 +82,6 @@ impl AppState {
             endpoint,
             bucket,
             client,
-            notes: notes::empty_store(),
         })
     }
 }
@@ -323,29 +320,6 @@ fn with_cors(mut response: Response) -> Response {
     response
 }
 
-fn parse_llm_query(query: Option<&str>) -> Result<(usize, usize), &'static str> {
-    let params: std::collections::HashMap<_, _> =
-        url::form_urlencoded::parse(query.unwrap_or_default().as_bytes())
-            .into_owned()
-            .collect();
-    let offset = match params.get("offset") {
-        Some(value) => value
-            .parse::<usize>()
-            .map_err(|_| "offset must be a non-negative integer")?,
-        None => 0,
-    };
-    let limit = match params.get("limit") {
-        Some(value) => value
-            .parse::<usize>()
-            .map_err(|_| "limit must be an integer from 1 to 100")?,
-        None => 20,
-    };
-    if limit == 0 || (params.contains_key("limit") && limit > 100) {
-        return Err("limit must be 1..100");
-    }
-    Ok((offset, limit))
-}
-
 fn upstream_status(status: reqwest::StatusCode) -> StatusCode {
     StatusCode::from_u16(status.as_u16()).expect("valid HTTP status")
 }
@@ -380,22 +354,6 @@ async fn handler(State(state): State<AppState>, request: Request<Body>) -> Respo
         Some(pathname) => pathname,
         None => return plain(StatusCode::BAD_REQUEST, "bad request"),
     };
-    if host == "zexi.me"
-        && (matches!(
-            pathname.as_str(),
-            "/" | "/index.html" | "/llms.txt" | "/feed/search.json"
-        ) || pathname.starts_with("/feed/runtime/"))
-    {
-        return notes::response(&state, &method, &pathname, uri.query());
-    }
-    if host == "zexi.me"
-        && matches!(
-            pathname.as_str(),
-            "/rss.xml" | "/articles.json" | "/llm" | "/llm.md" | "/index.md"
-        )
-    {
-        return plain(StatusCode::GONE, "Use /llms.txt?offset=0&limit=20");
-    }
     let requested_path = if pathname.ends_with('/') {
         format!("{pathname}index.html")
     } else {
@@ -504,10 +462,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .unwrap_or_else(|_| DEFAULT_PORT.to_string())
         .parse::<u16>()?;
     let state = AppState::from_env()?;
-    if let Err(error) = notes::refresh(&state).await {
-        error!(%error, "initial notes cache unavailable");
-    }
-    tokio::spawn(notes::schedule(state.clone()));
     let address = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(address).await?;
     info!(%address, bucket = %state.bucket, "static gateway listening");
@@ -526,12 +480,15 @@ mod tests {
     #[test]
     fn normalizes_hosts_and_rejects_unsafe_values() {
         assert_eq!(
-            normalize_host(Some("ZEXI.ME:443")).as_deref(),
-            Some("zexi.me")
+            normalize_host(Some("EXAMPLE.ME:443")).as_deref(),
+            Some("example.me")
         );
-        assert_eq!(normalize_host(Some("zexi.me.")).as_deref(), Some("zexi.me"));
+        assert_eq!(
+            normalize_host(Some("example.me.")).as_deref(),
+            Some("example.me")
+        );
         assert_eq!(normalize_host(Some("localhost")), None);
-        assert_eq!(normalize_host(Some("../zexi.me")), None);
+        assert_eq!(normalize_host(Some("../example.me")), None);
     }
 
     #[test]
@@ -547,8 +504,8 @@ mod tests {
     #[test]
     fn maps_hosts_and_paths_to_object_keys() {
         assert_eq!(
-            encode_object_key("zexi.me", "/articles/hello/index.html"),
-            "zexi.me/articles/hello/index.html"
+            encode_object_key("example.me", "/articles/hello/index.html"),
+            "example.me/articles/hello/index.html"
         );
     }
 
@@ -563,20 +520,6 @@ mod tests {
             cache_control_for("/robots.txt", None),
             "public, max-age=3600"
         );
-    }
-
-    #[test]
-    fn validates_llm_pagination_parameters() {
-        assert_eq!(parse_llm_query(None).unwrap(), (0, 20));
-        assert_eq!(parse_llm_query(Some("offset=40")).unwrap(), (40, 20));
-        assert_eq!(
-            parse_llm_query(Some("offset=40&limit=10")).unwrap(),
-            (40, 10)
-        );
-        assert!(parse_llm_query(Some("offset=nope")).is_err());
-        assert!(parse_llm_query(Some("offset=-1")).is_err());
-        assert!(parse_llm_query(Some("limit=0")).is_err());
-        assert!(parse_llm_query(Some("limit=101")).is_err());
     }
 
     async fn mock_storage() -> (String, tokio::task::JoinHandle<()>) {
@@ -632,118 +575,6 @@ mod tests {
         (format!("http://{address}"), handle)
     }
 
-    async fn mock_llm_storage() -> (String, tokio::task::JoinHandle<()>) {
-        async fn serve(request: Request<Body>) -> Response {
-            let path = percent_decode_str(request.uri().path())
-                .decode_utf8()
-                .unwrap();
-            let body = match path.as_ref() {
-                "/sites/zexi.me/feed/all.json" => Some(serde_json::json!({"snapshotId":"bbbbbbbbbbbbbbbb","total":100,"items":(0..100).map(|i| serde_json::json!({"id":i.to_string(),"text":if i==40 {"forty".to_string()} else {format!("note {i}")},"source":"微博","publishedAt":"2026-01-01T00:00:00Z"})).collect::<Vec<_>>()} ).to_string()),
-                "/sites/zexi.me/notes-template.html" => Some("__FEED_PAGES__ __FEED_SNAPSHOT__ __FEED_ITEMS__".to_string()),
-                "/sites/zexi.me/notes-emojis.json" => Some("{}".to_string()),
-                _ => None,
-            };
-            match body {
-                Some(body) => Response::builder()
-                    .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(body))
-                    .unwrap(),
-                None => Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .body(Body::empty())
-                    .unwrap(),
-            }
-        }
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .unwrap();
-        let address = listener.local_addr().unwrap();
-        let handle = tokio::spawn(async move {
-            let _ = axum::serve(listener, Router::new().fallback(serve)).await;
-        });
-        (format!("http://{address}"), handle)
-    }
-
-    #[tokio::test]
-    async fn llm_feed_uses_latest_content_and_simple_pagination() {
-        let (endpoint, storage) = mock_llm_storage().await;
-        let state = AppState {
-            endpoint,
-            bucket: "sites".to_owned(),
-            client: Client::new(),
-            notes: notes::empty_store(),
-        };
-        notes::refresh(&state).await.unwrap();
-        let gateway = app(state);
-        let response = gateway
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/llms.txt?offset=40&limit=2")
-                    .header(header::HOST, "zexi.me")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert!(String::from_utf8_lossy(&body).contains("forty"));
-        assert!(String::from_utf8_lossy(&body).starts_with("# Zexi's Notes\n\n"));
-        assert!(String::from_utf8_lossy(&body).contains("```bash\n# 搜索\ncurl"));
-        assert!(String::from_utf8_lossy(&body).contains("# 翻页\ncurl "));
-        assert!(!String::from_utf8_lossy(&body).contains("snapshot"));
-        assert!(String::from_utf8_lossy(&body).contains("/llms.txt?offset=42&limit=2)"));
-        let response = gateway
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::HEAD)
-                    .uri("/llms.txt?offset=40&limit=2")
-                    .header(header::HOST, "zexi.me")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(
-            to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        let response = gateway
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/llms.txt?offset=40&limit=2&snapshot=aaaaaaaaaaaaaaaa")
-                    .header(header::HOST, "zexi.me")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(
-            String::from_utf8_lossy(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
-                .contains("/llms.txt?offset=42&limit=2)")
-        );
-        let response = gateway
-            .oneshot(
-                Request::builder()
-                    .uri("/llms.txt?offset=18446744073709551615&limit=100")
-                    .header(header::HOST, "zexi.me")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        storage.abort();
-    }
-
     #[tokio::test]
     async fn serves_static_gateway_behaviour() {
         let (endpoint, storage) = mock_storage().await;
@@ -751,7 +582,6 @@ mod tests {
             endpoint,
             bucket: "sites".to_owned(),
             client: Client::new(),
-            notes: notes::empty_store(),
         };
         let gateway = app(state);
 
