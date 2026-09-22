@@ -10,8 +10,8 @@ RUN cargo build --release --target x86_64-unknown-linux-musl
 
 FROM scratch
 
-COPY --from=build /app/target/x86_64-unknown-linux-musl/release/static-gateway /static-gateway
+COPY --from=build /app/target/x86_64-unknown-linux-musl/release/web-static /web-static
 
 USER 1000:1000
 EXPOSE 8080
-ENTRYPOINT ["/static-gateway"]
+ENTRYPOINT ["/web-static"]

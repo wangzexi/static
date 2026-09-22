@@ -1,10 +1,10 @@
 [package]
-name = "static-gateway"
+name = "web-static"
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
-description = "A small Host-to-S3 static website gateway for personal K3s clusters"
+description = "A small generic Host-to-S3 website gateway for personal K3s clusters"
 
 [dependencies]
 axum = "0.8"

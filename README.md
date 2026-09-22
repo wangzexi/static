@@ -1,4 +1,4 @@
-# static
+# web-static
 
 面向个人 K3s 集群的极小静态网站网关，使用 Rust、Axum 和 reqwest
 实现。它把请求的 Host 直接映射到 S3 bucket 中的同名目录，不维护站点

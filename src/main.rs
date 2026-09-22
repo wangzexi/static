@@ -455,7 +455,7 @@ async fn shutdown_signal() {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
-        .with_env_filter(env::var("RUST_LOG").unwrap_or_else(|_| "static_gateway=info".to_owned()))
+        .with_env_filter(env::var("RUST_LOG").unwrap_or_else(|_| "web_static=info".to_owned()))
         .init();
 
     let port = env::var("PORT")
@@ -464,7 +464,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = AppState::from_env()?;
     let address = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(address).await?;
-    info!(%address, bucket = %state.bucket, "static gateway listening");
+    info!(%address, bucket = %state.bucket, "web static gateway listening");
     axum::serve(listener, app(state))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
